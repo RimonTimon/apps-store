@@ -24,7 +24,7 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Strictly allow ONLY mdrimon01889@gmail.com with verified email
+    // Server-side admin check (never exposed in frontend bundle)
     function isAdmin() {
       return isSignedIn()
         && request.auth.token.email == 'mdrimon01889@gmail.com'
@@ -90,6 +90,12 @@ service cloud.firestore {
         && data.ownerId == request.auth.uid
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    // Server-side admin verification sentinel (zero email exposure in client code)
+    match /admin_check/{docId} {
+      allow get: if isValidId(docId) && docId == 'status' && isAdmin();
+      allow list, create, update, delete: if false;
     }
 
     match /apps/{appId} {

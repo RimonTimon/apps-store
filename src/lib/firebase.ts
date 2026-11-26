@@ -3,7 +3,7 @@ import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-export const ALLOWED_ADMIN_EMAIL = 'mdrimon01889@gmail.com';
+export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -11,18 +11,22 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
   prompt: 'select_account',
-  login_hint: ALLOWED_ADMIN_EMAIL,
 });
 
-export function isAuthorizedAdminEmail(
-  email?: string | null,
-  emailVerified?: boolean | null
-): boolean {
-  return Boolean(
-    email &&
-      email.trim().toLowerCase() === ALLOWED_ADMIN_EMAIL.toLowerCase() &&
-      emailVerified === true
-  );
+/**
+ * Verifies admin privilege strictly on the Firebase server via Firestore rules
+ * (/admin_check/status). The owner email is NEVER stored or exposed in client code.
+ */
+export async function verifyServerAdmin(): Promise<boolean> {
+  if (!auth.currentUser || !auth.currentUser.emailVerified) {
+    return false;
+  }
+  try {
+    await getDocFromServer(doc(db, 'admin_check', 'status'));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export enum OperationType {
@@ -40,14 +44,9 @@ export interface FirestoreErrorInfo {
   path: string | null;
   authInfo: {
     userId?: string | null;
-    email?: string | null;
     emailVerified?: boolean | null;
     isAnonymous?: boolean | null;
     tenantId?: string | null;
-    providerInfo?: {
-      providerId?: string | null;
-      email?: string | null;
-    }[];
   };
 }
 
@@ -56,19 +55,14 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ): never {
+  // Never log raw email addresses to browser console
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
       userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
       emailVerified: auth.currentUser?.emailVerified,
       isAnonymous: auth.currentUser?.isAnonymous,
       tenantId: auth.currentUser?.tenantId,
-      providerInfo:
-        auth.currentUser?.providerData?.map((provider) => ({
-          providerId: provider.providerId,
-          email: provider.email,
-        })) || [],
     },
     operationType,
     path,

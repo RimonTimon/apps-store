@@ -445,6 +445,15 @@ export function resolveDirectDownload(
 }
 
 export function triggerDirectDownload(url: string, fileName?: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      return;
+    }
+  } catch {
+    return;
+  }
+
   const link = document.createElement('a');
   link.href = url;
   if (fileName) {

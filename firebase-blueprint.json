@@ -125,6 +125,12 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "AdminCheck": {
+      "title": "AdminCheck",
+      "description": "Server-side read-only verification gate so admin email never exists in client code.",
+      "type": "object",
+      "properties": {}
     }
   },
   "firestore": {
@@ -132,7 +138,13 @@
       "schema": {
         "$ref": "#/entities/ShowcaseApp"
       },
-      "description": "Publicly readable published apps; all writes restricted strictly to verified admin mdrimon01889@gmail.com."
+      "description": "Publicly readable published apps; all writes restricted strictly to verified studio admin."
+    },
+    "/admin_check/{docId}": {
+      "schema": {
+        "$ref": "#/entities/AdminCheck"
+      },
+      "description": "Server-side admin verification sentinel readable only by verified admin."
     }
   }
 }

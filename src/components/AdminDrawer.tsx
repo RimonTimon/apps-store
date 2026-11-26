@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { deleteUser, signInWithPopup, signOut, User } from 'firebase/auth';
 import {
+  ArrowUpRight,
   Edit3,
   Eye,
   EyeOff,
@@ -12,10 +13,10 @@ import {
   X,
 } from 'lucide-react';
 import {
-  ALLOWED_ADMIN_EMAIL,
   auth,
+  FIREBASE_PROJECT_ID,
   googleProvider,
-  isAuthorizedAdminEmail,
+  verifyServerAdmin,
 } from '../lib/firebase';
 import {
   BLUEPRINT_LIMITS,
@@ -44,10 +45,14 @@ interface AdminDrawerProps {
   user: User | null;
   isAdmin: boolean;
   apps: ShowcaseApp[];
+  onAdminVerified: (verified: boolean) => void;
   onNotify: (message: string) => void;
 }
 
 type AdminTab = 'form' | 'apps' | 'import';
+
+const MAX_FAILED_ATTEMPTS = 3;
+const COOLDOWN_MS = 30_000;
 
 const EMPTY_FORM: AppFormPayload = {
   name: '',
@@ -73,6 +78,7 @@ export function AdminDrawer({
   user,
   isAdmin,
   apps,
+  onAdminVerified,
   onNotify,
 }: AdminDrawerProps) {
   const [tab, setTab] = useState<AdminTab>('form');
@@ -86,9 +92,13 @@ export function AdminDrawer({
   const [fetchMessage, setFetchMessage] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  // Strict single-email auth state
+  // Auth & brute-force cooldown state (zero email exposure)
   const [signingIn, setSigningIn] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [unauthorizedDomainHost, setUnauthorizedDomainHost] = useState<string | null>(null);
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [cooldownUntil, setCooldownUntil] = useState(0);
+  const [cooldownSecondsLeft, setCooldownSecondsLeft] = useState(0);
 
   // GitHub profile import state
   const [ghUsernameInput, setGhUsernameInput] = useState('RimonTimon');
@@ -105,6 +115,20 @@ export function AdminDrawer({
     return () => window.removeEventListener('keydown', handleKey);
   }, [open, onClose]);
 
+  useEffect(() => {
+    if (cooldownUntil <= Date.now()) {
+      setCooldownSecondsLeft(0);
+      return;
+    }
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000));
+      setCooldownSecondsLeft(remaining);
+    };
+    tick();
+    const interval = window.setInterval(tick, 500);
+    return () => window.clearInterval(interval);
+  }, [cooldownUntil]);
+
   if (!open) return null;
 
   const resetForm = () => {
@@ -117,25 +141,56 @@ export function AdminDrawer({
   };
 
   const handleGoogleSignIn = async () => {
+    if (Date.now() < cooldownUntil) return;
+
     setSigningIn(true);
     setAuthError('');
+    setUnauthorizedDomainHost(null);
+
     try {
       const cred = await signInWithPopup(auth, googleProvider);
-      if (!isAuthorizedAdminEmail(cred.user.email, cred.user.emailVerified)) {
-        // Immediately remove unauthorized account & sign out
+      const allowed = await verifyServerAdmin();
+
+      if (!allowed) {
         try {
           await deleteUser(cred.user);
         } catch {
           await signOut(auth);
         }
-        setAuthError(
-          `Blocked: Only ${ALLOWED_ADMIN_EMAIL} is allowed to access Manage.`
-        );
+        onAdminVerified(false);
+
+        const nextFails = failedAttempts + 1;
+        setFailedAttempts(nextFails);
+        if (nextFails >= MAX_FAILED_ATTEMPTS) {
+          setCooldownUntil(Date.now() + COOLDOWN_MS);
+          setFailedAttempts(0);
+          setAuthError('Access denied. Too many unauthorized attempts. Please wait 30 seconds.');
+        } else {
+          setAuthError('Access denied. This account does not have admin permission.');
+        }
+        return;
       }
+
+      setFailedAttempts(0);
+      onAdminVerified(true);
     } catch (err) {
-      setAuthError(
-        err instanceof Error ? err.message : 'Google sign-in could not be completed.'
-      );
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: string }).code)
+          : '';
+
+      if (code === 'auth/unauthorized-domain') {
+        setUnauthorizedDomainHost(window.location.hostname);
+        setAuthError(
+          `This domain (${window.location.hostname}) is not authorized for Google Sign-In yet.`
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setAuthError('Sign-in popup was blocked by your browser. Please allow popups and try again.');
+      } else if (code === 'auth/popup-closed-by-user') {
+        setAuthError('Sign-in was canceled.');
+      } else {
+        setAuthError('Sign-in could not be completed. Please try again.');
+      }
     } finally {
       setSigningIn(false);
     }
@@ -143,6 +198,7 @@ export function AdminDrawer({
 
   const handleSignOut = async () => {
     await signOut(auth);
+    onAdminVerified(false);
     setAuthError('');
   };
 
@@ -303,6 +359,7 @@ export function AdminDrawer({
     'w-full px-3.5 py-2.5 text-sm bg-[#F5F5F7] text-zinc-900 rounded-xl placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-600/30 transition-all';
 
   const labelClass = 'block text-xs font-medium text-zinc-500 mb-1.5';
+  const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`;
 
   return (
     <div
@@ -343,7 +400,7 @@ export function AdminDrawer({
           </div>
         </div>
 
-        {/* Strict Single-User Google Auth Gate */}
+        {/* Strict Server-Verified Admin Auth Gate (Zero Email Exposure) */}
         {!user || !isAdmin ? (
           <div className="flex-1 flex items-center justify-center p-8">
             <div className="max-w-sm w-full text-center space-y-5">
@@ -355,25 +412,45 @@ export function AdminDrawer({
                   Admin Access Only
                 </h3>
                 <p className="text-sm text-zinc-500 leading-relaxed">
-                  Only <span className="font-mono text-zinc-800">{ALLOWED_ADMIN_EMAIL}</span> is
-                  allowed to sign in. All other emails are automatically blocked.
+                  Restricted to the site owner. Unauthorized Google accounts are automatically blocked.
                 </p>
               </div>
 
               {authError && (
-                <div className="p-3.5 text-xs font-medium text-red-700 bg-red-50 rounded-2xl">
-                  {authError}
+                <div className="p-4 text-xs text-left leading-relaxed text-red-700 bg-red-50 rounded-2xl space-y-2.5">
+                  <p className="font-medium">{authError}</p>
+                  {unauthorizedDomainHost && (
+                    <div className="pt-1 space-y-2 text-zinc-700">
+                      <p>
+                        Add <code className="font-mono font-semibold text-zinc-900">{unauthorizedDomainHost}</code> under{' '}
+                        <strong>Authorized domains</strong> in Firebase Authentication settings:
+                      </p>
+                      <a
+                        href={firebaseAuthSettingsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-blue-600 hover:underline"
+                      >
+                        <span>Open Firebase Auth Settings</span>
+                        <ArrowUpRight className="w-3.5 h-3.5" aria-hidden="true" />
+                      </a>
+                    </div>
+                  )}
                 </div>
               )}
 
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
-                disabled={signingIn}
-                className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-full transition-colors cursor-pointer"
+                disabled={signingIn || cooldownSecondsLeft > 0}
+                className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-50 rounded-full transition-colors cursor-pointer"
               >
                 {signingIn && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>Continue with Google</span>
+                <span>
+                  {cooldownSecondsLeft > 0
+                    ? `Try again in ${cooldownSecondsLeft}s`
+                    : 'Continue with Google'}
+                </span>
               </button>
             </div>
           </div>

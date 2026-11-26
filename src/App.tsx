@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { deleteUser, onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { ArrowUpRight, Download, X } from 'lucide-react';
-import { auth, isAuthorizedAdminEmail } from './lib/firebase';
+import { auth, verifyServerAdmin } from './lib/firebase';
 import { SAMPLE_SHOWCASE_APPS } from './data/defaults';
 import { GitHubAsset, GitHubReleaseInfo, ShowcaseApp } from './types/app';
 import { subscribeToApps } from './services/firestore';
@@ -22,6 +22,7 @@ const RIMON_GITHUB_HANDLE = 'RimonTimon';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [authReady, setAuthReady] = useState(false);
 
   const [firestoreApps, setFirestoreApps] = useState<ShowcaseApp[]>([]);
@@ -33,22 +34,38 @@ export default function App() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const isAdmin = isAuthorizedAdminEmail(user?.email, user?.emailVerified);
-
-  // Strict single-user auth guard: block and sign out ANY email other than mdrimon01889@gmail.com
+  // Server-verified single-owner auth guard (zero admin email stored in client code)
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (currentUser) => {
-      if (currentUser && !isAuthorizedAdminEmail(currentUser.email, currentUser.emailVerified)) {
+    let active = true;
+    const unsub = onAuthStateChanged(auth, async (currentUser) => {
+      if (!currentUser) {
+        if (!active) return;
+        setUser(null);
+        setIsAdmin(false);
+        setAuthReady(true);
+        return;
+      }
+
+      const verified = await verifyServerAdmin();
+      if (!active) return;
+
+      if (!verified) {
         deleteUser(currentUser)
           .catch(() => signOut(auth))
           .catch(() => {});
         setUser(null);
+        setIsAdmin(false);
       } else {
         setUser(currentUser);
+        setIsAdmin(true);
       }
       setAuthReady(true);
     });
-    return () => unsub();
+
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
   // Subscribe to published apps from Firestore
@@ -294,13 +311,14 @@ export default function App() {
         onDownload={handleDirectDownload}
       />
 
-      {/* Restricted Owner-Only Manage Drawer (mdrimon01889@gmail.com ONLY) */}
+      {/* Restricted Owner-Only Manage Drawer */}
       <AdminDrawer
         open={adminOpen}
         onClose={() => setAdminOpen(false)}
         user={user}
         isAdmin={isAdmin}
         apps={firestoreApps}
+        onAdminVerified={setIsAdmin}
         onNotify={(msg) => setToast(msg)}
       />
 
