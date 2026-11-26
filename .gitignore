@@ -4,21 +4,8 @@ dist/
 coverage/
 .DS_Store
 *.log
-
-# Environment variables & local secrets
 .env
 .env.*
 !.env.example
-
-# Firebase local config & credentials (keep out of public GitHub repos)
-firebase-applet-config.json
-*firebase-adminsdk*.json
-*serviceAccount*.json
-.firebase/
-firebase-debug*.log
-firestore-debug*.log
-
-# Certificates & private keys
 *.pem
 *.key
-*.p12

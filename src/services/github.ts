@@ -300,6 +300,119 @@ export async function fetchUserGitHubRepos(username: string): Promise<GitHubRepo
   }));
 }
 
+const AUTO_SYNC_CACHE_PREFIX = 'appshelf_autosync_v1_';
+
+export async function fetchAutoSyncedGitHubApps(
+  username: string
+): Promise<{ apps: ShowcaseApp[]; releases: Record<string, GitHubReleaseInfo> }> {
+  const cleanUser = username.trim().replace(/^@/, '');
+  if (!cleanUser) return { apps: [], releases: {} };
+
+  try {
+    const rawCached = sessionStorage.getItem(`${AUTO_SYNC_CACHE_PREFIX}${cleanUser}`);
+    if (rawCached) {
+      const parsed = JSON.parse(rawCached) as {
+        ts: number;
+        apps: ShowcaseApp[];
+        releases: Record<string, GitHubReleaseInfo>;
+      };
+      if (Date.now() - parsed.ts < CACHE_TTL_MS) {
+        return { apps: parsed.apps, releases: parsed.releases };
+      }
+    }
+  } catch {
+    // Ignore cache read error
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.github.com/users/${encodeURIComponent(cleanUser)}/repos?sort=updated&per_page=15`,
+      { headers: { Accept: 'application/vnd.github+json' } }
+    );
+    if (!res.ok) return { apps: [], releases: {} };
+
+    const repos = await res.json();
+    if (!Array.isArray(repos)) return { apps: [], releases: {} };
+
+    const ownRepos = repos.filter((r) => !r.fork && !r.archived).slice(0, 10);
+    const syncedApps: ShowcaseApp[] = [];
+    const syncedReleases: Record<string, GitHubReleaseInfo> = {};
+
+    await Promise.all(
+      ownRepos.map(async (repo, idx) => {
+        const fullName = String(repo.full_name || '');
+        if (!fullName) return;
+
+        const topics: string[] = Array.isArray(repo.topics)
+          ? repo.topics.map((t: string) => String(t).toLowerCase())
+          : [];
+        const hasAppTopic =
+          topics.includes('app') ||
+          topics.includes('apps') ||
+          topics.includes('showcase') ||
+          topics.includes('release');
+
+        const releaseInfo = await fetchGitHubReleaseInfo(fullName, 'Cross-Platform', '');
+        const hasReleaseAssets = Boolean(releaseInfo && releaseInfo.assets.length > 0);
+        const hasReleaseTag = Boolean(releaseInfo && releaseInfo.tagName);
+
+        if (!hasReleaseAssets && !hasReleaseTag && !hasAppTopic) {
+          return;
+        }
+
+        const platform = detectPlatformFromAssets(releaseInfo?.assets || []);
+        const prettyName = String(repo.name || '')
+          .replace(/[-_]+/g, ' ')
+          .replace(/\b\w/g, (c) => c.toUpperCase());
+
+        const id = `gh-${String(repo.id || idx)}`;
+        const desc =
+          (typeof repo.description === 'string' && repo.description.trim()) ||
+          `Direct GitHub release of ${prettyName}.`;
+
+        syncedApps.push({
+          id,
+          name: prettyName.slice(0, 80),
+          tagline: desc.slice(0, 160),
+          description: desc.slice(0, 2000),
+          platform,
+          category: repo.language || 'App',
+          githubRepo: fullName,
+          directDownloadUrl: releaseInfo?.primaryAsset?.browserDownloadUrl || '',
+          assetKeyword: '',
+          version: releaseInfo?.tagName || 'Latest',
+          fileSize: releaseInfo?.primaryAsset?.sizeFormatted || '',
+          coverImage: '',
+          highlights: [],
+          featured: idx === 0,
+          isPublished: true,
+          sortOrder: idx,
+          ownerId: cleanUser,
+        });
+
+        if (releaseInfo) {
+          syncedReleases[id] = releaseInfo;
+        }
+      })
+    );
+
+    syncedApps.sort((a, b) => a.sortOrder - b.sortOrder);
+
+    try {
+      sessionStorage.setItem(
+        `${AUTO_SYNC_CACHE_PREFIX}${cleanUser}`,
+        JSON.stringify({ ts: Date.now(), apps: syncedApps, releases: syncedReleases })
+      );
+    } catch {
+      // Ignore quota errors
+    }
+
+    return { apps: syncedApps, releases: syncedReleases };
+  } catch {
+    return { apps: [], releases: {} };
+  }
+}
+
 export function resolveDirectDownload(
   app: ShowcaseApp,
   release?: GitHubReleaseInfo | null

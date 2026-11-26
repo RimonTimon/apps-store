@@ -1,34 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { ArrowUpRight, Download, X } from 'lucide-react';
-import { ADMIN_EMAIL, auth } from './lib/firebase';
-import { DEFAULT_STUDIO_SETTINGS, SAMPLE_SHOWCASE_APPS } from './data/defaults';
+import { GitHubAsset, GitHubReleaseInfo, ShowcaseApp } from './types/app';
 import {
-  GitHubAsset,
-  GitHubReleaseInfo,
-  ShowcaseApp,
-  StudioSettings,
-} from './types/app';
-import { subscribeToApps, subscribeToStudioSettings } from './services/firestore';
-import {
+  fetchAutoSyncedGitHubApps,
   fetchGitHubReleaseInfo,
   resolveDirectDownload,
   triggerDirectDownload,
 } from './services/github';
+import {
+  clearLocalDraftConfig,
+  DEFAULT_CONFIG,
+  loadShowcaseConfig,
+  saveLocalDraftConfig,
+  ShowcaseConfig,
+} from './services/storage';
 import { Header } from './components/Header';
 import { AppCover } from './components/AppCover';
 import { AppDetailModal } from './components/AppDetailModal';
 import { AdminDrawer } from './components/AdminDrawer';
 
-const RIMON_WEBSITE_URL = 'https://rimon-profile.vercel.app';
-const RIMON_GITHUB_HANDLE = 'RimonTimon';
-
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
-
-  const [firestoreApps, setFirestoreApps] = useState<ShowcaseApp[]>([]);
-  const [settings, setSettings] = useState<StudioSettings>(DEFAULT_STUDIO_SETTINGS);
+  const [config, setConfig] = useState<ShowcaseConfig>(DEFAULT_CONFIG);
+  const [hasLocalOverrides, setHasLocalOverrides] = useState(false);
+  const [autoSyncedApps, setAutoSyncedApps] = useState<ShowcaseApp[]>([]);
   const [releases, setReleases] = useState<Record<string, GitHubReleaseInfo>>({});
 
   const [selectedApp, setSelectedApp] = useState<ShowcaseApp | null>(null);
@@ -36,58 +30,68 @@ export default function App() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const isAdmin = Boolean(
-    user &&
-      user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() &&
-      user.emailVerified
-  );
-
-  // Enforce strict single-owner authentication: immediately sign out any other account
+  // Load zero-config public/apps.json (or local draft)
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (currentUser) => {
-      if (
-        currentUser &&
-        (currentUser.email?.toLowerCase() !== ADMIN_EMAIL.toLowerCase() ||
-          !currentUser.emailVerified)
-      ) {
-        signOut(auth).catch(() => {});
-        setUser(null);
-      } else {
-        setUser(currentUser);
-      }
-      setAuthReady(true);
+    let active = true;
+    loadShowcaseConfig().then(({ config: loaded, hasLocalOverrides: local }) => {
+      if (!active) return;
+      setConfig(loaded);
+      setHasLocalOverrides(local);
     });
-    return () => unsub();
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Subscribe to Firestore apps & studio settings
+  // Automatically discover public GitHub Releases under githubUsername (RimonTimon) — zero API keys needed
   useEffect(() => {
-    if (!authReady) return;
+    if (!config.autoSyncGithubReleases || !config.githubUsername) {
+      setAutoSyncedApps([]);
+      return;
+    }
 
-    const unsubApps = subscribeToApps(
-      isAdmin,
-      (items) => setFirestoreApps(items),
-      () => {}
-    );
-
-    const unsubSettings = subscribeToStudioSettings(
-      (data) => setSettings(data),
-      () => setSettings(DEFAULT_STUDIO_SETTINGS)
-    );
+    let cancelled = false;
+    fetchAutoSyncedGitHubApps(config.githubUsername).then(({ apps, releases: rels }) => {
+      if (cancelled) return;
+      setAutoSyncedApps(apps);
+      if (Object.keys(rels).length > 0) {
+        setReleases((prev) => ({ ...prev, ...rels }));
+      }
+    });
 
     return () => {
-      unsubApps();
-      unsubSettings();
+      cancelled = true;
     };
-  }, [authReady, isAdmin]);
+  }, [config.autoSyncGithubReleases, config.githubUsername]);
 
+  // Combine curated apps and auto-synced GitHub releases seamlessly
   const visibleApps = useMemo(() => {
-    const publishedCustom = firestoreApps.filter((a) => a.isPublished);
-    if (publishedCustom.length > 0) {
-      return publishedCustom;
+    const publishedCustom = config.apps.filter((a) => a.isPublished);
+    const nonSampleCustom = publishedCustom.filter((a) => !a.isSample);
+
+    // Build deduplicated list prioritizing user's curated apps + auto-synced GitHub repos
+    const seenRepos = new Set<string>();
+    const combined: ShowcaseApp[] = [];
+
+    for (const app of nonSampleCustom) {
+      seenRepos.add(app.githubRepo.toLowerCase());
+      combined.push(app);
     }
-    return SAMPLE_SHOWCASE_APPS;
-  }, [firestoreApps]);
+
+    for (const ghApp of autoSyncedApps) {
+      const key = ghApp.githubRepo.toLowerCase();
+      if (!seenRepos.has(key)) {
+        seenRepos.add(key);
+        combined.push(ghApp);
+      }
+    }
+
+    // If user hasn't added custom apps and has no GitHub Releases yet, display sample showcase apps
+    if (combined.length > 0) {
+      return combined;
+    }
+    return publishedCustom;
+  }, [config.apps, autoSyncedApps]);
 
   // Resolve live GitHub Release binaries for direct one-click downloads
   useEffect(() => {
@@ -106,11 +110,13 @@ export default function App() {
       );
 
       if (cancelled) return;
-      const next: Record<string, GitHubReleaseInfo> = {};
-      for (const [id, info] of entries) {
-        if (info) next[id] = info;
-      }
-      setReleases(next);
+      setReleases((prev) => {
+        const next = { ...prev };
+        for (const [id, info] of entries) {
+          if (info) next[id] = info;
+        }
+        return next;
+      });
     }
 
     if (visibleApps.length > 0) {
@@ -128,6 +134,20 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const handleUpdateConfig = (next: ShowcaseConfig) => {
+    setConfig(next);
+    setHasLocalOverrides(true);
+    saveLocalDraftConfig(next);
+  };
+
+  const handleResetOverrides = async () => {
+    clearLocalDraftConfig();
+    const { config: fresh } = await loadShowcaseConfig();
+    setConfig(fresh);
+    setHasLocalOverrides(false);
+    setToast('Restored apps.json defaults.');
+  };
+
   const handleDirectDownload = (app: ShowcaseApp, customAsset?: GitHubAsset) => {
     setDownloadingId(app.id);
     const rel = releases[app.id];
@@ -143,14 +163,14 @@ export default function App() {
     }, 850);
   };
 
-  const githubUsername = settings.githubUsername || RIMON_GITHUB_HANDLE;
+  const githubUsername = config.githubUsername || 'RimonTimon';
   const githubProfileUrl = `https://github.com/${githubUsername}`;
-  const websiteUrl = settings.contactUrl || RIMON_WEBSITE_URL;
+  const websiteUrl = config.websiteUrl || 'https://rimon-profile.vercel.app';
 
   return (
     <div id="top" className="min-h-screen flex flex-col bg-[#F5F5F7] text-zinc-900">
       <Header
-        studioName={settings.studioName}
+        studioName={config.studioName}
         githubUrl={githubProfileUrl}
         websiteUrl={websiteUrl}
       />
@@ -170,7 +190,7 @@ export default function App() {
                   key={app.id}
                   className="group flex flex-col justify-between gap-5 p-5 sm:p-6 rounded-3xl bg-white shadow-[0_2px_14px_rgba(0,0,0,0.03)] hover:shadow-[0_10px_30px_rgba(0,0,0,0.06)] transition-shadow duration-200"
                 >
-                  {/* Top Row: Standard Round Icon + Name + Meta */}
+                  {/* Top Row: Standard Round Icon + Name + Short Details */}
                   <div className="flex items-start gap-4">
                     <button
                       type="button"
@@ -271,7 +291,7 @@ export default function App() {
               onClick={() => setAdminOpen(true)}
               className="text-xs text-zinc-400 hover:text-zinc-900 transition-colors whitespace-nowrap cursor-pointer"
             >
-              Admin
+              Manage
             </button>
           </div>
         </div>
@@ -286,15 +306,14 @@ export default function App() {
         onDownload={handleDirectDownload}
       />
 
-      {/* Restricted Owner-Only Admin Panel */}
+      {/* Zero-Config App Manager Drawer */}
       <AdminDrawer
         open={adminOpen}
         onClose={() => setAdminOpen(false)}
-        user={user}
-        isAdmin={isAdmin}
-        apps={firestoreApps}
-        settings={settings}
-        lang="en"
+        config={config}
+        hasLocalOverrides={hasLocalOverrides}
+        onUpdateConfig={handleUpdateConfig}
+        onResetOverrides={handleResetOverrides}
         onNotify={(msg) => setToast(msg)}
       />
 
