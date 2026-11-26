@@ -1,0 +1,124 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Strictly allow ONLY mdrimon01889@gmail.com with verified email
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email == 'mdrimon01889@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isValidPlatform(p) {
+      return p is string && p in ['Android', 'Windows', 'macOS', 'Linux', 'Cross-Platform', 'Web'];
+    }
+
+    function isValidUrlOrEmpty(u, maxLen) {
+      return u is string
+        && u.size() <= maxLen
+        && (u.size() == 0 || u.matches('^https://.*') || u.matches('^/src/assets/images/.*'));
+    }
+
+    function isValidHighlightItem(item) {
+      return item is string && item.size() >= 1 && item.size() <= 120;
+    }
+
+    function isValidHighlights(list) {
+      return list is list
+        && list.size() <= 6
+        && (list.size() < 1 || isValidHighlightItem(list[0]))
+        && (list.size() < 2 || isValidHighlightItem(list[1]))
+        && (list.size() < 3 || isValidHighlightItem(list[2]))
+        && (list.size() < 4 || isValidHighlightItem(list[3]))
+        && (list.size() < 5 || isValidHighlightItem(list[4]))
+        && (list.size() < 6 || isValidHighlightItem(list[5]));
+    }
+
+    function isValidShowcaseApp(data) {
+      return data.keys().hasAll([
+          'name', 'tagline', 'description', 'platform', 'category',
+          'githubRepo', 'directDownloadUrl', 'assetKeyword', 'version',
+          'fileSize', 'coverImage', 'highlights', 'featured', 'isPublished',
+          'sortOrder', 'ownerId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'name', 'tagline', 'description', 'platform', 'category',
+          'githubRepo', 'directDownloadUrl', 'assetKeyword', 'version',
+          'fileSize', 'coverImage', 'highlights', 'featured', 'isPublished',
+          'sortOrder', 'ownerId', 'createdAt', 'updatedAt'
+        ])
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.tagline is string && data.tagline.size() >= 1 && data.tagline.size() <= 160
+        && data.description is string && data.description.size() >= 1 && data.description.size() <= 2000
+        && isValidPlatform(data.platform)
+        && data.category is string && data.category.size() >= 1 && data.category.size() <= 40
+        && data.githubRepo is string && data.githubRepo.size() >= 3 && data.githubRepo.size() <= 120
+        && data.githubRepo.matches('^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$')
+        && isValidUrlOrEmpty(data.directDownloadUrl, 500)
+        && data.assetKeyword is string && data.assetKeyword.size() <= 40
+        && data.version is string && data.version.size() >= 1 && data.version.size() <= 32
+        && data.fileSize is string && data.fileSize.size() <= 32
+        && isValidUrlOrEmpty(data.coverImage, 500)
+        && isValidHighlights(data.highlights)
+        && data.featured is bool
+        && data.isPublished is bool
+        && data.sortOrder is number && data.sortOrder >= 0 && data.sortOrder <= 10000
+        && data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128
+        && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.ownerId == request.auth.uid
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /apps/{appId} {
+      allow get: if isValidId(appId) && ((resource != null && resource.data.isPublished == true) || isAdmin());
+      allow list: if resource.data.isPublished == true || isAdmin();
+
+      allow create: if isAdmin()
+        && isValidId(appId)
+        && isValidShowcaseApp(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidId(appId)
+        && isValidShowcaseApp(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'tagline', 'description', 'platform', 'category',
+            'githubRepo', 'directDownloadUrl', 'assetKeyword', 'version',
+            'fileSize', 'coverImage', 'highlights', 'featured', 'isPublished',
+            'sortOrder', 'updatedAt'
+          ]) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['featured', 'isPublished', 'updatedAt'])
+        );
+
+      allow delete: if isAdmin() && isValidId(appId);
+    }
+  }
+}

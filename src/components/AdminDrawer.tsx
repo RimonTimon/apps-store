@@ -1,17 +1,22 @@
 import React, { useEffect, useState } from 'react';
+import { deleteUser, signInWithPopup, signOut, User } from 'firebase/auth';
 import {
-  Check,
-  Copy,
-  Download,
   Edit3,
   Eye,
   EyeOff,
   Loader2,
+  Lock,
+  LogOut,
   RefreshCw,
-  RotateCcw,
   Trash2,
   X,
 } from 'lucide-react';
+import {
+  ALLOWED_ADMIN_EMAIL,
+  auth,
+  googleProvider,
+  isAuthorizedAdminEmail,
+} from '../lib/firebase';
 import {
   BLUEPRINT_LIMITS,
   GitHubRepoSummary,
@@ -26,42 +31,25 @@ import {
   parseGitHubRepoInput,
 } from '../services/github';
 import {
-  downloadAppsJsonFile,
-  serializeConfigForExport,
-  ShowcaseConfig,
-} from '../services/storage';
+  AppFormPayload,
+  createShowcaseApp,
+  deleteShowcaseApp,
+  toggleShowcaseAppFlags,
+  updateShowcaseApp,
+} from '../services/firestore';
 
 interface AdminDrawerProps {
   open: boolean;
   onClose: () => void;
-  config: ShowcaseConfig;
-  hasLocalOverrides: boolean;
-  onUpdateConfig: (next: ShowcaseConfig) => void;
-  onResetOverrides: () => void;
+  user: User | null;
+  isAdmin: boolean;
+  apps: ShowcaseApp[];
   onNotify: (message: string) => void;
 }
 
 type AdminTab = 'form' | 'apps' | 'import';
 
-interface AppDraft {
-  name: string;
-  tagline: string;
-  description: string;
-  platform: PlatformType;
-  category: string;
-  githubRepo: string;
-  directDownloadUrl: string;
-  assetKeyword: string;
-  version: string;
-  fileSize: string;
-  coverImage: string;
-  highlights: string[];
-  featured: boolean;
-  isPublished: boolean;
-  sortOrder: number;
-}
-
-const EMPTY_FORM: AppDraft = {
+const EMPTY_FORM: AppFormPayload = {
   name: '',
   tagline: '',
   description: '',
@@ -82,27 +70,28 @@ const EMPTY_FORM: AppDraft = {
 export function AdminDrawer({
   open,
   onClose,
-  config,
-  hasLocalOverrides,
-  onUpdateConfig,
-  onResetOverrides,
+  user,
+  isAdmin,
+  apps,
   onNotify,
 }: AdminDrawerProps) {
   const [tab, setTab] = useState<AdminTab>('form');
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<AppDraft>(EMPTY_FORM);
+  const [form, setForm] = useState<AppFormPayload>(EMPTY_FORM);
   const [highlightsText, setHighlightsText] = useState('');
   const [repoInput, setRepoInput] = useState('');
   const [fetchingGh, setFetchingGh] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const [fetchMessage, setFetchMessage] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [copiedJson, setCopiedJson] = useState(false);
+
+  // Strict single-email auth state
+  const [signingIn, setSigningIn] = useState(false);
+  const [authError, setAuthError] = useState('');
 
   // GitHub profile import state
-  const [ghUsernameInput, setGhUsernameInput] = useState(
-    config.githubUsername || 'RimonTimon'
-  );
+  const [ghUsernameInput, setGhUsernameInput] = useState('RimonTimon');
   const [importedRepos, setImportedRepos] = useState<GitHubRepoSummary[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [importError, setImportError] = useState('');
@@ -118,15 +107,43 @@ export function AdminDrawer({
 
   if (!open) return null;
 
-  const customApps = config.apps;
-
   const resetForm = () => {
     setEditingId(null);
-    setForm({ ...EMPTY_FORM, sortOrder: customApps.length + 1 });
+    setForm({ ...EMPTY_FORM, sortOrder: apps.length + 1 });
     setHighlightsText('');
     setRepoInput('');
     setFormError('');
     setFetchMessage('');
+  };
+
+  const handleGoogleSignIn = async () => {
+    setSigningIn(true);
+    setAuthError('');
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      if (!isAuthorizedAdminEmail(cred.user.email, cred.user.emailVerified)) {
+        // Immediately remove unauthorized account & sign out
+        try {
+          await deleteUser(cred.user);
+        } catch {
+          await signOut(auth);
+        }
+        setAuthError(
+          `Blocked: Only ${ALLOWED_ADMIN_EMAIL} is allowed to access Manage.`
+        );
+      }
+    } catch (err) {
+      setAuthError(
+        err instanceof Error ? err.message : 'Google sign-in could not be completed.'
+      );
+    } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut(auth);
+    setAuthError('');
   };
 
   const handleFetchFromGitHub = async (overrideRepo?: string) => {
@@ -169,8 +186,9 @@ export function AdminDrawer({
     }
   };
 
-  const handleSubmitApp = (e: React.FormEvent) => {
+  const handleSubmitApp = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isAdmin) return;
     setFormError('');
 
     const parsedRepo = parseGitHubRepoInput(repoInput || form.githubRepo);
@@ -185,44 +203,29 @@ export function AdminDrawer({
       .filter(Boolean)
       .slice(0, BLUEPRINT_LIMITS.app.highlightsMaxCount);
 
-    const slug = form.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 40);
+    const payload: AppFormPayload = {
+      ...form,
+      githubRepo: parsedRepo,
+      highlights,
+      sortOrder: editingId ? form.sortOrder : apps.length + 1,
+    };
 
-    if (editingId) {
-      const updatedApps = customApps.map((item) =>
-        item.id === editingId
-          ? {
-              ...item,
-              ...form,
-              githubRepo: parsedRepo,
-              highlights,
-              isSample: false,
-            }
-          : item
-      );
-      onUpdateConfig({ ...config, apps: updatedApps });
-      onNotify('App updated.');
-    } else {
-      const newApp: ShowcaseApp = {
-        id: `${slug || 'app'}-${Date.now().toString(36)}`,
-        ...form,
-        githubRepo: parsedRepo,
-        highlights,
-        sortOrder: customApps.length + 1,
-        ownerId: config.githubUsername || 'RimonTimon',
-        isSample: false,
-      };
-      // Drop sample placeholders once user adds their own first real app
-      const nonSample = customApps.filter((a) => !a.isSample);
-      onUpdateConfig({ ...config, apps: [newApp, ...nonSample] });
-      onNotify('App added to showcase.');
+    setSaving(true);
+    try {
+      if (editingId) {
+        await updateShowcaseApp(editingId, payload);
+        onNotify('App updated.');
+      } else {
+        await createShowcaseApp(payload);
+        onNotify('App published.');
+      }
+      resetForm();
+      setTab('apps');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Failed to save app.');
+    } finally {
+      setSaving(false);
     }
-
-    resetForm();
-    setTab('apps');
   };
 
   const startEdit = (app: ShowcaseApp) => {
@@ -251,19 +254,24 @@ export function AdminDrawer({
     setTab('form');
   };
 
-  const handleDelete = (id: string) => {
-    const nextApps = customApps.filter((a) => a.id !== id);
-    onUpdateConfig({ ...config, apps: nextApps });
-    setConfirmDeleteId(null);
-    if (editingId === id) resetForm();
-    onNotify('App removed.');
+  const handleDelete = async (id: string) => {
+    if (!isAdmin) return;
+    try {
+      await deleteShowcaseApp(id);
+      setConfirmDeleteId(null);
+      if (editingId === id) resetForm();
+      onNotify('App deleted.');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Delete failed.');
+    }
   };
 
-  const handleTogglePublished = (app: ShowcaseApp) => {
-    const nextApps = customApps.map((a) =>
-      a.id === app.id ? { ...a, isPublished: !a.isPublished } : a
-    );
-    onUpdateConfig({ ...config, apps: nextApps });
+  const handleTogglePublished = async (app: ShowcaseApp) => {
+    if (!isAdmin) return;
+    await toggleShowcaseAppFlags(app.id, {
+      featured: app.featured,
+      isPublished: !app.isPublished,
+    });
   };
 
   const handleLoadUserRepos = async (e: React.FormEvent) => {
@@ -291,17 +299,6 @@ export function AdminDrawer({
     await handleFetchFromGitHub(fullName);
   };
 
-  const handleCopyJson = async () => {
-    try {
-      await navigator.clipboard.writeText(serializeConfigForExport(config));
-      setCopiedJson(true);
-      onNotify('Copied apps.json to clipboard.');
-      window.setTimeout(() => setCopiedJson(false), 2000);
-    } catch {
-      downloadAppsJsonFile(config);
-    }
-  };
-
   const inputClass =
     'w-full px-3.5 py-2.5 text-sm bg-[#F5F5F7] text-zinc-900 rounded-xl placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-blue-600/30 transition-all';
 
@@ -322,482 +319,475 @@ export function AdminDrawer({
         {/* Header */}
         <div className="px-6 h-16 flex items-center justify-between shrink-0">
           <h2 className="font-display text-lg font-bold tracking-tight text-zinc-900">
-            Manage Apps
+            Manage
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close panel"
-            className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-[#F5F5F7] text-zinc-500 hover:text-zinc-900 transition-colors cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Tabs */}
-        <div className="px-6 pb-3 shrink-0">
-          <div className="grid grid-cols-3 gap-1 p-1 bg-[#F5F5F7] rounded-xl">
-            {(
-              [
-                { id: 'form', label: editingId ? 'Edit App' : 'Add App' },
-                { id: 'apps', label: `Apps (${customApps.length})` },
-                { id: 'import', label: 'GitHub Sync' },
-              ] as const
-            ).map((item) => (
+          <div className="flex items-center gap-2">
+            {user && isAdmin && (
               <button
-                key={item.id}
                 type="button"
-                onClick={() => setTab(item.id)}
-                className={`px-2 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap truncate cursor-pointer ${
-                  tab === item.id
-                    ? 'bg-white text-zinc-900 shadow-2xs'
-                    : 'text-zinc-500 hover:text-zinc-900'
-                }`}
+                onClick={handleSignOut}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-900 rounded-full transition-colors cursor-pointer"
               >
-                {item.label}
+                <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Sign Out</span>
               </button>
-            ))}
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close panel"
+              className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-[#F5F5F7] text-zinc-500 hover:text-zinc-900 transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          {tab === 'form' && (
-            <form onSubmit={handleSubmitApp} className="space-y-4">
-              <div>
-                <label htmlFor="gh-repo-input" className={labelClass}>
-                  GitHub Repository
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    id="gh-repo-input"
-                    type="text"
-                    value={repoInput}
-                    onChange={(e) => {
-                      setRepoInput(e.target.value);
-                      setForm((prev) => ({ ...prev, githubRepo: e.target.value }));
-                    }}
-                    placeholder="RimonTimon/my-app or full GitHub URL"
-                    className={inputClass}
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => handleFetchFromGitHub()}
-                    disabled={fetchingGh}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    {fetchingGh ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                    <span>{fetchingGh ? 'Fetching...' : 'Auto-Fill'}</span>
-                  </button>
-                </div>
-                {fetchMessage && (
-                  <p className="mt-1.5 text-xs text-emerald-600">{fetchMessage}</p>
-                )}
+        {/* Strict Single-User Google Auth Gate */}
+        {!user || !isAdmin ? (
+          <div className="flex-1 flex items-center justify-center p-8">
+            <div className="max-w-sm w-full text-center space-y-5">
+              <div className="w-12 h-12 rounded-full bg-[#F5F5F7] text-zinc-700 flex items-center justify-center mx-auto">
+                <Lock className="w-5 h-5" aria-hidden="true" />
+              </div>
+              <div className="space-y-2">
+                <h3 className="font-display text-xl font-bold text-zinc-900">
+                  Admin Access Only
+                </h3>
+                <p className="text-sm text-zinc-500 leading-relaxed">
+                  Only <span className="font-mono text-zinc-800">{ALLOWED_ADMIN_EMAIL}</span> is
+                  allowed to sign in. All other emails are automatically blocked.
+                </p>
               </div>
 
-              {formError && (
-                <div className="p-3 text-xs text-red-600 bg-red-50 rounded-xl">
-                  {formError}
+              {authError && (
+                <div className="p-3.5 text-xs font-medium text-red-700 bg-red-50 rounded-2xl">
+                  {authError}
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label htmlFor="app-name" className={labelClass}>
-                    App Name
-                  </label>
-                  <input
-                    id="app-name"
-                    type="text"
-                    maxLength={BLUEPRINT_LIMITS.app.nameMax}
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    className={inputClass}
-                    required
-                  />
-                </div>
-                <div>
-                  <label htmlFor="app-platform" className={labelClass}>
-                    Platform
-                  </label>
-                  <select
-                    id="app-platform"
-                    value={form.platform}
-                    onChange={(e) =>
-                      setForm({ ...form, platform: e.target.value as PlatformType })
-                    }
-                    className={inputClass}
-                  >
-                    {PLATFORMS.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label htmlFor="app-tagline" className={labelClass}>
-                  Short Details
-                </label>
-                <input
-                  id="app-tagline"
-                  type="text"
-                  maxLength={BLUEPRINT_LIMITS.app.taglineMax}
-                  value={form.tagline}
-                  onChange={(e) => setForm({ ...form, tagline: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-              </div>
-
-              <div>
-                <label htmlFor="app-desc" className={labelClass}>
-                  Full Description
-                </label>
-                <textarea
-                  id="app-desc"
-                  rows={3}
-                  maxLength={BLUEPRINT_LIMITS.app.descriptionMax}
-                  value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
-                  className={inputClass}
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label htmlFor="app-version" className={labelClass}>
-                    Version
-                  </label>
-                  <input
-                    id="app-version"
-                    type="text"
-                    value={form.version}
-                    onChange={(e) => setForm({ ...form, version: e.target.value })}
-                    className={`${inputClass} font-mono`}
-                    required
-                  />
-                </div>
-                <div>
-                  <label htmlFor="app-size" className={labelClass}>
-                    File Size
-                  </label>
-                  <input
-                    id="app-size"
-                    type="text"
-                    value={form.fileSize}
-                    onChange={(e) => setForm({ ...form, fileSize: e.target.value })}
-                    placeholder="18 MB"
-                    className={`${inputClass} font-mono`}
-                  />
-                </div>
-                <div>
-                  <label htmlFor="app-ext" className={labelClass}>
-                    File Type
-                  </label>
-                  <input
-                    id="app-ext"
-                    type="text"
-                    value={form.assetKeyword}
-                    onChange={(e) => setForm({ ...form, assetKeyword: e.target.value })}
-                    placeholder=".apk / .exe"
-                    className={`${inputClass} font-mono`}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label htmlFor="app-direct-url" className={labelClass}>
-                  Direct Download URL (optional — auto-resolved from GitHub Releases)
-                </label>
-                <input
-                  id="app-direct-url"
-                  type="url"
-                  value={form.directDownloadUrl}
-                  onChange={(e) =>
-                    setForm({ ...form, directDownloadUrl: e.target.value })
-                  }
-                  placeholder="https://github.com/RimonTimon/..."
-                  className={inputClass}
-                />
-              </div>
-
-              <div>
-                <span className={labelClass}>App Round Icon</span>
-                <div className="flex items-center gap-2.5 mb-2.5">
-                  {COVER_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      onClick={() => setForm({ ...form, coverImage: preset.path })}
-                      title={preset.label}
-                      className={`w-11 h-11 rounded-full overflow-hidden transition-all cursor-pointer ${
-                        form.coverImage === preset.path
-                          ? 'ring-2 ring-blue-600 ring-offset-2'
-                          : 'opacity-70 hover:opacity-100'
-                      }`}
-                    >
-                      <img
-                        src={preset.path}
-                        alt={preset.label}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover"
-                      />
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="text"
-                  value={form.coverImage}
-                  onChange={(e) => setForm({ ...form, coverImage: e.target.value })}
-                  placeholder="Or paste an https:// icon URL..."
-                  className={inputClass}
-                />
-              </div>
-
-              <div>
-                <label htmlFor="app-highlights" className={labelClass}>
-                  Key Features (one per line, optional)
-                </label>
-                <textarea
-                  id="app-highlights"
-                  rows={2}
-                  value={highlightsText}
-                  onChange={(e) => setHighlightsText(e.target.value)}
-                  placeholder="Lightweight and fast&#10;Direct GitHub updates"
-                  className={inputClass}
-                />
-              </div>
-
-              <div className="pt-2 flex items-center gap-3">
-                <button
-                  type="submit"
-                  className="flex-1 px-5 py-2.5 text-sm font-medium text-white bg-zinc-900 hover:bg-blue-600 rounded-full transition-colors cursor-pointer"
-                >
-                  {editingId ? 'Save Changes' : 'Add App'}
-                </button>
-                {editingId && (
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={signingIn}
+                className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-full transition-colors cursor-pointer"
+              >
+                {signingIn && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>Continue with Google</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Tabs */}
+            <div className="px-6 pb-3 shrink-0">
+              <div className="grid grid-cols-3 gap-1 p-1 bg-[#F5F5F7] rounded-xl">
+                {(
+                  [
+                    { id: 'form', label: editingId ? 'Edit App' : 'Add App' },
+                    { id: 'apps', label: `My Apps (${apps.length})` },
+                    { id: 'import', label: 'GitHub Import' },
+                  ] as const
+                ).map((item) => (
                   <button
-                    type="button"
-                    onClick={resetForm}
-                    className="px-4 py-2.5 text-sm font-medium text-zinc-600 bg-[#F5F5F7] hover:bg-zinc-200/70 rounded-full transition-colors cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                )}
-              </div>
-            </form>
-          )}
-
-          {tab === 'apps' && (
-            <div className="space-y-5">
-              {/* Zero-Database Export Card */}
-              <div className="p-4 rounded-2xl bg-[#F5F5F7] space-y-3">
-                <p className="text-xs leading-relaxed text-zinc-600">
-                  No Firebase or API keys needed. Publish permanently for everyone by replacing{' '}
-                  <code className="font-mono text-zinc-900">public/apps.json</code> in your GitHub repo, or just publish a GitHub Release under{' '}
-                  <code className="font-mono text-zinc-900">{config.githubUsername}</code> for automatic syncing.
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      downloadAppsJsonFile(config);
-                      onNotify('Downloaded apps.json');
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-zinc-900 hover:bg-blue-600 rounded-full transition-colors cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download apps.json</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCopyJson}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-zinc-700 bg-white hover:bg-zinc-50 rounded-full transition-colors cursor-pointer"
-                  >
-                    {copiedJson ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                    <span>{copiedJson ? 'Copied' : 'Copy JSON'}</span>
-                  </button>
-                  {hasLocalOverrides && (
-                    <button
-                      type="button"
-                      onClick={onResetOverrides}
-                      className="inline-flex items-center gap-1 px-3 py-2 text-xs font-medium text-zinc-500 hover:text-zinc-900 transition-colors cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Reset local edits</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-2.5">
-                {customApps.map((item) => (
-                  <div
                     key={item.id}
-                    className="p-4 rounded-2xl bg-[#F5F5F7] flex items-center justify-between gap-3"
+                    type="button"
+                    onClick={() => setTab(item.id)}
+                    className={`px-2 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap truncate cursor-pointer ${
+                      tab === item.id
+                        ? 'bg-white text-zinc-900 shadow-2xs'
+                        : 'text-zinc-500 hover:text-zinc-900'
+                    }`}
                   >
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-zinc-900 truncate">
-                        {item.name}
-                      </p>
-                      <p className="text-xs font-mono text-zinc-400 truncate mt-0.5">
-                        {item.version} · {item.githubRepo}
-                      </p>
-                    </div>
-
-                    {confirmDeleteId === item.id ? (
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(item.id)}
-                          className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-full cursor-pointer"
-                        >
-                          Delete
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteId(null)}
-                          className="px-3 py-1.5 text-xs font-medium text-zinc-600 bg-white rounded-full cursor-pointer"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          title={item.isPublished ? 'Visible' : 'Hidden'}
-                          onClick={() => handleTogglePublished(item)}
-                          className="p-2 text-zinc-500 hover:text-zinc-900 rounded-full transition-colors cursor-pointer"
-                        >
-                          {item.isPublished ? (
-                            <Eye className="w-4 h-4" />
-                          ) : (
-                            <EyeOff className="w-4 h-4" />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          title="Edit"
-                          onClick={() => startEdit(item)}
-                          className="p-2 text-zinc-500 hover:text-zinc-900 rounded-full transition-colors cursor-pointer"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          title="Delete"
-                          onClick={() => setConfirmDeleteId(item.id)}
-                          className="p-2 text-zinc-400 hover:text-red-600 rounded-full transition-colors cursor-pointer"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                    {item.label}
+                  </button>
                 ))}
               </div>
             </div>
-          )}
 
-          {tab === 'import' && (
-            <div className="space-y-5">
-              {/* Auto-Sync Toggle */}
-              <div className="p-4 rounded-2xl bg-[#F5F5F7] flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-sm font-semibold text-zinc-900">
-                    Automatic GitHub Releases Sync
-                  </p>
-                  <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
-                    Automatically display any public repo on{' '}
-                    <span className="font-mono text-zinc-700">
-                      github.com/{config.githubUsername}
-                    </span>{' '}
-                    that has a GitHub Release or the <span className="font-mono">app</span> topic.
-                  </p>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={config.autoSyncGithubReleases}
-                  onChange={(e) =>
-                    onUpdateConfig({
-                      ...config,
-                      autoSyncGithubReleases: e.target.checked,
-                    })
-                  }
-                  aria-label="Enable automatic GitHub Releases sync"
-                  className="mt-1 w-4 h-4 rounded accent-blue-600 cursor-pointer shrink-0"
-                />
-              </div>
-
-              <div>
-                <h3 className="text-xs font-semibold text-zinc-500 mb-2.5">
-                  Import Repository from GitHub
-                </h3>
-                <form onSubmit={handleLoadUserRepos} className="flex gap-2">
-                  <input
-                    type="text"
-                    value={ghUsernameInput}
-                    onChange={(e) => setGhUsernameInput(e.target.value)}
-                    placeholder="RimonTimon"
-                    className={inputClass}
-                  />
-                  <button
-                    type="submit"
-                    disabled={loadingRepos}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-xl whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    {loadingRepos && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    <span>Load Repos</span>
-                  </button>
-                </form>
-                {importError && (
-                  <p className="mt-2 text-xs text-red-600">{importError}</p>
-                )}
-              </div>
-
-              {importedRepos.length > 0 && (
-                <div className="space-y-2">
-                  {importedRepos.map((repo) => (
-                    <div
-                      key={repo.fullName}
-                      className="p-3.5 rounded-2xl bg-[#F5F5F7] flex items-center justify-between gap-4"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-zinc-900 truncate">
-                          {repo.name}
-                        </p>
-                        <p className="text-xs text-zinc-500 truncate mt-0.5">
-                          {repo.description || repo.fullName}
-                        </p>
-                      </div>
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              {tab === 'form' && (
+                <form onSubmit={handleSubmitApp} className="space-y-4">
+                  <div>
+                    <label htmlFor="gh-repo-input" className={labelClass}>
+                      GitHub Repository
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        id="gh-repo-input"
+                        type="text"
+                        value={repoInput}
+                        onChange={(e) => {
+                          setRepoInput(e.target.value);
+                          setForm((prev) => ({ ...prev, githubRepo: e.target.value }));
+                        }}
+                        placeholder="RimonTimon/my-app or full GitHub URL"
+                        className={inputClass}
+                        required
+                      />
                       <button
                         type="button"
-                        onClick={() => handleSelectImportedRepo(repo.fullName)}
-                        className="px-3.5 py-1.5 text-xs font-medium text-zinc-900 bg-white hover:bg-blue-600 hover:text-white rounded-full whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                        onClick={() => handleFetchFromGitHub()}
+                        disabled={fetchingGh}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
-                        Add
+                        {fetchingGh ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        <span>{fetchingGh ? 'Fetching...' : 'Auto-Fill'}</span>
                       </button>
                     </div>
-                  ))}
+                    {fetchMessage && (
+                      <p className="mt-1.5 text-xs text-emerald-600">{fetchMessage}</p>
+                    )}
+                  </div>
+
+                  {formError && (
+                    <div className="p-3 text-xs text-red-600 bg-red-50 rounded-xl">
+                      {formError}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div>
+                      <label htmlFor="app-name" className={labelClass}>
+                        App Name
+                      </label>
+                      <input
+                        id="app-name"
+                        type="text"
+                        maxLength={BLUEPRINT_LIMITS.app.nameMax}
+                        value={form.name}
+                        onChange={(e) => setForm({ ...form, name: e.target.value })}
+                        className={inputClass}
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="app-platform" className={labelClass}>
+                        Platform
+                      </label>
+                      <select
+                        id="app-platform"
+                        value={form.platform}
+                        onChange={(e) =>
+                          setForm({ ...form, platform: e.target.value as PlatformType })
+                        }
+                        className={inputClass}
+                      >
+                        {PLATFORMS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="app-tagline" className={labelClass}>
+                      Short Details
+                    </label>
+                    <input
+                      id="app-tagline"
+                      type="text"
+                      maxLength={BLUEPRINT_LIMITS.app.taglineMax}
+                      value={form.tagline}
+                      onChange={(e) => setForm({ ...form, tagline: e.target.value })}
+                      className={inputClass}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="app-desc" className={labelClass}>
+                      Full Description
+                    </label>
+                    <textarea
+                      id="app-desc"
+                      rows={3}
+                      maxLength={BLUEPRINT_LIMITS.app.descriptionMax}
+                      value={form.description}
+                      onChange={(e) => setForm({ ...form, description: e.target.value })}
+                      className={inputClass}
+                      required
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label htmlFor="app-version" className={labelClass}>
+                        Version
+                      </label>
+                      <input
+                        id="app-version"
+                        type="text"
+                        value={form.version}
+                        onChange={(e) => setForm({ ...form, version: e.target.value })}
+                        className={`${inputClass} font-mono`}
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="app-size" className={labelClass}>
+                        File Size
+                      </label>
+                      <input
+                        id="app-size"
+                        type="text"
+                        value={form.fileSize}
+                        onChange={(e) => setForm({ ...form, fileSize: e.target.value })}
+                        placeholder="18 MB"
+                        className={`${inputClass} font-mono`}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="app-ext" className={labelClass}>
+                        File Type
+                      </label>
+                      <input
+                        id="app-ext"
+                        type="text"
+                        value={form.assetKeyword}
+                        onChange={(e) => setForm({ ...form, assetKeyword: e.target.value })}
+                        placeholder=".apk / .exe"
+                        className={`${inputClass} font-mono`}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="app-direct-url" className={labelClass}>
+                      Direct Download URL (optional — auto-resolved from GitHub Releases)
+                    </label>
+                    <input
+                      id="app-direct-url"
+                      type="url"
+                      value={form.directDownloadUrl}
+                      onChange={(e) =>
+                        setForm({ ...form, directDownloadUrl: e.target.value })
+                      }
+                      placeholder="https://github.com/RimonTimon/..."
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div>
+                    <span className={labelClass}>App Round Icon</span>
+                    <div className="flex items-center gap-2.5 mb-2.5">
+                      {COVER_PRESETS.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => setForm({ ...form, coverImage: preset.path })}
+                          title={preset.label}
+                          className={`w-11 h-11 rounded-full overflow-hidden transition-all cursor-pointer ${
+                            form.coverImage === preset.path
+                              ? 'ring-2 ring-blue-600 ring-offset-2'
+                              : 'opacity-70 hover:opacity-100'
+                          }`}
+                        >
+                          <img
+                            src={preset.path}
+                            alt={preset.label}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      value={form.coverImage}
+                      onChange={(e) => setForm({ ...form, coverImage: e.target.value })}
+                      placeholder="Or paste an https:// icon URL..."
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="app-highlights" className={labelClass}>
+                      Key Features (one per line, optional)
+                    </label>
+                    <textarea
+                      id="app-highlights"
+                      rows={2}
+                      value={highlightsText}
+                      onChange={(e) => setHighlightsText(e.target.value)}
+                      placeholder="Lightweight and fast&#10;Direct GitHub updates"
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div className="pt-2 flex items-center gap-3">
+                    <button
+                      type="submit"
+                      disabled={saving}
+                      className="flex-1 inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-full transition-colors cursor-pointer"
+                    >
+                      {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <span>
+                        {saving ? 'Saving...' : editingId ? 'Save Changes' : 'Publish App'}
+                      </span>
+                    </button>
+                    {editingId && (
+                      <button
+                        type="button"
+                        onClick={resetForm}
+                        className="px-4 py-2.5 text-sm font-medium text-zinc-600 bg-[#F5F5F7] hover:bg-zinc-200/70 rounded-full transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </form>
+              )}
+
+              {tab === 'apps' && (
+                <div className="space-y-2.5">
+                  {apps.length === 0 ? (
+                    <div className="py-12 text-center space-y-3">
+                      <p className="text-sm text-zinc-500">
+                        No custom apps published yet. Add your first GitHub repo to replace the preview cards.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetForm();
+                          setTab('form');
+                        }}
+                        className="px-4 py-2 text-xs font-medium text-white bg-zinc-900 hover:bg-blue-600 rounded-full transition-colors cursor-pointer"
+                      >
+                        Add App
+                      </button>
+                    </div>
+                  ) : (
+                    apps.map((item) => (
+                      <div
+                        key={item.id}
+                        className="p-4 rounded-2xl bg-[#F5F5F7] flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-zinc-900 truncate">
+                            {item.name}
+                          </p>
+                          <p className="text-xs font-mono text-zinc-400 truncate mt-0.5">
+                            {item.version} · {item.githubRepo}
+                          </p>
+                        </div>
+
+                        {confirmDeleteId === item.id ? (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(item.id)}
+                              className="px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded-full cursor-pointer"
+                            >
+                              Delete
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(null)}
+                              className="px-3 py-1.5 text-xs font-medium text-zinc-600 bg-white rounded-full cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              title={item.isPublished ? 'Visible' : 'Hidden'}
+                              onClick={() => handleTogglePublished(item)}
+                              className="p-2 text-zinc-500 hover:text-zinc-900 rounded-full transition-colors cursor-pointer"
+                            >
+                              {item.isPublished ? (
+                                <Eye className="w-4 h-4" />
+                              ) : (
+                                <EyeOff className="w-4 h-4" />
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              title="Edit"
+                              onClick={() => startEdit(item)}
+                              className="p-2 text-zinc-500 hover:text-zinc-900 rounded-full transition-colors cursor-pointer"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              title="Delete"
+                              onClick={() => setConfirmDeleteId(item.id)}
+                              className="p-2 text-zinc-400 hover:text-red-600 rounded-full transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {tab === 'import' && (
+                <div className="space-y-4">
+                  <form onSubmit={handleLoadUserRepos} className="flex gap-2">
+                    <input
+                      type="text"
+                      value={ghUsernameInput}
+                      onChange={(e) => setGhUsernameInput(e.target.value)}
+                      placeholder="RimonTimon"
+                      className={inputClass}
+                    />
+                    <button
+                      type="submit"
+                      disabled={loadingRepos}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-zinc-900 hover:bg-blue-600 disabled:opacity-60 rounded-xl whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      {loadingRepos && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <span>Load Repos</span>
+                    </button>
+                  </form>
+                  {importError && (
+                    <p className="text-xs text-red-600">{importError}</p>
+                  )}
+
+                  {importedRepos.length > 0 && (
+                    <div className="space-y-2">
+                      {importedRepos.map((repo) => (
+                        <div
+                          key={repo.fullName}
+                          className="p-3.5 rounded-2xl bg-[#F5F5F7] flex items-center justify-between gap-4"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-zinc-900 truncate">
+                              {repo.name}
+                            </p>
+                            <p className="text-xs text-zinc-500 truncate mt-0.5">
+                              {repo.description || repo.fullName}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleSelectImportedRepo(repo.fullName)}
+                            className="px-3.5 py-1.5 text-xs font-medium text-zinc-900 bg-white hover:bg-blue-600 hover:text-white rounded-full whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                          >
+                            Select
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
-        </div>
+          </>
+        )}
       </div>
     </div>
   );

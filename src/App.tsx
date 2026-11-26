@@ -1,27 +1,30 @@
 import { useEffect, useMemo, useState } from 'react';
+import { deleteUser, onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { ArrowUpRight, Download, X } from 'lucide-react';
+import { auth, isAuthorizedAdminEmail } from './lib/firebase';
+import { SAMPLE_SHOWCASE_APPS } from './data/defaults';
 import { GitHubAsset, GitHubReleaseInfo, ShowcaseApp } from './types/app';
+import { subscribeToApps } from './services/firestore';
 import {
   fetchAutoSyncedGitHubApps,
   fetchGitHubReleaseInfo,
   resolveDirectDownload,
   triggerDirectDownload,
 } from './services/github';
-import {
-  clearLocalDraftConfig,
-  DEFAULT_CONFIG,
-  loadShowcaseConfig,
-  saveLocalDraftConfig,
-  ShowcaseConfig,
-} from './services/storage';
 import { Header } from './components/Header';
 import { AppCover } from './components/AppCover';
 import { AppDetailModal } from './components/AppDetailModal';
 import { AdminDrawer } from './components/AdminDrawer';
 
+const STUDIO_NAME = 'Apps by Rimon';
+const RIMON_WEBSITE_URL = 'https://rimon-profile.vercel.app';
+const RIMON_GITHUB_HANDLE = 'RimonTimon';
+
 export default function App() {
-  const [config, setConfig] = useState<ShowcaseConfig>(DEFAULT_CONFIG);
-  const [hasLocalOverrides, setHasLocalOverrides] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  const [firestoreApps, setFirestoreApps] = useState<ShowcaseApp[]>([]);
   const [autoSyncedApps, setAutoSyncedApps] = useState<ShowcaseApp[]>([]);
   const [releases, setReleases] = useState<Record<string, GitHubReleaseInfo>>({});
 
@@ -30,50 +33,57 @@ export default function App() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Load zero-config public/apps.json (or local draft)
+  const isAdmin = isAuthorizedAdminEmail(user?.email, user?.emailVerified);
+
+  // Strict single-user auth guard: block and sign out ANY email other than mdrimon01889@gmail.com
   useEffect(() => {
-    let active = true;
-    loadShowcaseConfig().then(({ config: loaded, hasLocalOverrides: local }) => {
-      if (!active) return;
-      setConfig(loaded);
-      setHasLocalOverrides(local);
+    const unsub = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser && !isAuthorizedAdminEmail(currentUser.email, currentUser.emailVerified)) {
+        deleteUser(currentUser)
+          .catch(() => signOut(auth))
+          .catch(() => {});
+        setUser(null);
+      } else {
+        setUser(currentUser);
+      }
+      setAuthReady(true);
     });
-    return () => {
-      active = false;
-    };
+    return () => unsub();
   }, []);
 
-  // Automatically discover public GitHub Releases under githubUsername (RimonTimon) — zero API keys needed
+  // Subscribe to published apps from Firestore
   useEffect(() => {
-    if (!config.autoSyncGithubReleases || !config.githubUsername) {
-      setAutoSyncedApps([]);
-      return;
-    }
+    if (!authReady) return;
+    const unsub = subscribeToApps(
+      isAdmin,
+      (items) => setFirestoreApps(items),
+      () => {}
+    );
+    return () => unsub();
+  }, [authReady, isAdmin]);
 
+  // Automatically discover public GitHub Releases under RimonTimon
+  useEffect(() => {
     let cancelled = false;
-    fetchAutoSyncedGitHubApps(config.githubUsername).then(({ apps, releases: rels }) => {
+    fetchAutoSyncedGitHubApps(RIMON_GITHUB_HANDLE).then(({ apps, releases: rels }) => {
       if (cancelled) return;
       setAutoSyncedApps(apps);
       if (Object.keys(rels).length > 0) {
         setReleases((prev) => ({ ...prev, ...rels }));
       }
     });
-
     return () => {
       cancelled = true;
     };
-  }, [config.autoSyncGithubReleases, config.githubUsername]);
+  }, []);
 
-  // Combine curated apps and auto-synced GitHub releases seamlessly
+  // Combine Firestore apps + auto-synced GitHub releases (fall back to previews if empty)
   const visibleApps = useMemo(() => {
-    const publishedCustom = config.apps.filter((a) => a.isPublished);
-    const nonSampleCustom = publishedCustom.filter((a) => !a.isSample);
-
-    // Build deduplicated list prioritizing user's curated apps + auto-synced GitHub repos
+    const publishedDb = firestoreApps.filter((a) => a.isPublished);
     const seenRepos = new Set<string>();
     const combined: ShowcaseApp[] = [];
 
-    for (const app of nonSampleCustom) {
+    for (const app of publishedDb) {
       seenRepos.add(app.githubRepo.toLowerCase());
       combined.push(app);
     }
@@ -86,12 +96,8 @@ export default function App() {
       }
     }
 
-    // If user hasn't added custom apps and has no GitHub Releases yet, display sample showcase apps
-    if (combined.length > 0) {
-      return combined;
-    }
-    return publishedCustom;
-  }, [config.apps, autoSyncedApps]);
+    return combined.length > 0 ? combined : SAMPLE_SHOWCASE_APPS;
+  }, [firestoreApps, autoSyncedApps]);
 
   // Resolve live GitHub Release binaries for direct one-click downloads
   useEffect(() => {
@@ -134,20 +140,6 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const handleUpdateConfig = (next: ShowcaseConfig) => {
-    setConfig(next);
-    setHasLocalOverrides(true);
-    saveLocalDraftConfig(next);
-  };
-
-  const handleResetOverrides = async () => {
-    clearLocalDraftConfig();
-    const { config: fresh } = await loadShowcaseConfig();
-    setConfig(fresh);
-    setHasLocalOverrides(false);
-    setToast('Restored apps.json defaults.');
-  };
-
   const handleDirectDownload = (app: ShowcaseApp, customAsset?: GitHubAsset) => {
     setDownloadingId(app.id);
     const rel = releases[app.id];
@@ -163,19 +155,17 @@ export default function App() {
     }, 850);
   };
 
-  const githubUsername = config.githubUsername || 'RimonTimon';
-  const githubProfileUrl = `https://github.com/${githubUsername}`;
-  const websiteUrl = config.websiteUrl || 'https://rimon-profile.vercel.app';
+  const githubProfileUrl = `https://github.com/${RIMON_GITHUB_HANDLE}`;
 
   return (
     <div id="top" className="min-h-screen flex flex-col bg-[#F5F5F7] text-zinc-900">
       <Header
-        studioName={config.studioName}
+        studioName={STUDIO_NAME}
         githubUrl={githubProfileUrl}
-        websiteUrl={websiteUrl}
+        websiteUrl={RIMON_WEBSITE_URL}
       />
 
-      {/* Borderless Modern App Cards — Compact Round Icons, Zero Clutter */}
+      {/* Borderless Modern App Cards — Compact Round Icons */}
       <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 pt-4 sm:pt-8 pb-16 sm:pb-24">
         <section aria-label="Applications">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5">
@@ -190,7 +180,6 @@ export default function App() {
                   key={app.id}
                   className="group flex flex-col justify-between gap-5 p-5 sm:p-6 rounded-3xl bg-white shadow-[0_2px_14px_rgba(0,0,0,0.03)] hover:shadow-[0_10px_30px_rgba(0,0,0,0.06)] transition-shadow duration-200"
                 >
-                  {/* Top Row: Standard Round Icon + Name + Short Details */}
                   <div className="flex items-start gap-4">
                     <button
                       type="button"
@@ -233,7 +222,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Bottom Row: Clean One-Click Download + Subtle Details */}
                   <div className="flex items-center justify-between gap-3 pt-1">
                     <button
                       type="button"
@@ -269,7 +257,7 @@ export default function App() {
 
           <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
             <a
-              href={websiteUrl}
+              href={RIMON_WEBSITE_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 hover:text-zinc-900 transition-colors whitespace-nowrap"
@@ -283,7 +271,7 @@ export default function App() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 hover:text-zinc-900 transition-colors whitespace-nowrap"
             >
-              <span>github.com/{githubUsername}</span>
+              <span>github.com/{RIMON_GITHUB_HANDLE}</span>
               <ArrowUpRight className="w-3.5 h-3.5 opacity-60" aria-hidden="true" />
             </a>
             <button
@@ -306,14 +294,13 @@ export default function App() {
         onDownload={handleDirectDownload}
       />
 
-      {/* Zero-Config App Manager Drawer */}
+      {/* Restricted Owner-Only Manage Drawer (mdrimon01889@gmail.com ONLY) */}
       <AdminDrawer
         open={adminOpen}
         onClose={() => setAdminOpen(false)}
-        config={config}
-        hasLocalOverrides={hasLocalOverrides}
-        onUpdateConfig={handleUpdateConfig}
-        onResetOverrides={handleResetOverrides}
+        user={user}
+        isAdmin={isAdmin}
+        apps={firestoreApps}
         onNotify={(msg) => setToast(msg)}
       />
 
