@@ -1,0 +1,216 @@
+{
+  "entities": {
+    "ShowcaseApp": {
+      "title": "ShowcaseApp",
+      "description": "A software application showcased on the portfolio with direct GitHub Releases download configuration.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name of the application.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "tagline": {
+          "type": "string",
+          "description": "Short one-line summary of the application.",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of the application.",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "platform": {
+          "type": "string",
+          "description": "Primary target platform for the application.",
+          "enum": ["Android", "Windows", "macOS", "Linux", "Cross-Platform", "Web"]
+        },
+        "category": {
+          "type": "string",
+          "description": "Functional category of the application.",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "githubRepo": {
+          "type": "string",
+          "description": "GitHub repository in owner/repo format.",
+          "minLength": 3,
+          "maxLength": 120,
+          "pattern": "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$"
+        },
+        "directDownloadUrl": {
+          "type": "string",
+          "description": "Optional explicit GitHub release asset download URL.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "assetKeyword": {
+          "type": "string",
+          "description": "Optional asset filename suffix or keyword (e.g. .apk, .exe, .dmg).",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "version": {
+          "type": "string",
+          "description": "Fallback or pinned semantic version string.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "fileSize": {
+          "type": "string",
+          "description": "Optional formatted binary size string.",
+          "minLength": 0,
+          "maxLength": 32
+        },
+        "coverImage": {
+          "type": "string",
+          "description": "Relative asset path or HTTPS image URL for the app cover.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "highlights": {
+          "type": "array",
+          "description": "Up to 6 concise feature highlights for the app detail view."
+        },
+        "featured": {
+          "type": "boolean",
+          "description": "Whether the app is highlighted in the featured spotlight."
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether the app is publicly visible to visitors."
+        },
+        "sortOrder": {
+          "type": "number",
+          "description": "Numeric ordering priority for display."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the studio admin who created the record.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the app was published."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest update."
+        }
+      },
+      "required": [
+        "name",
+        "tagline",
+        "description",
+        "platform",
+        "category",
+        "githubRepo",
+        "directDownloadUrl",
+        "assetKeyword",
+        "version",
+        "fileSize",
+        "coverImage",
+        "highlights",
+        "featured",
+        "isPublished",
+        "sortOrder",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudioSettings": {
+      "title": "StudioSettings",
+      "description": "Public branding and GitHub profile configuration for the showcase.",
+      "type": "object",
+      "properties": {
+        "studioName": {
+          "type": "string",
+          "description": "Short brand wordmark displayed in header and footer.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "heroKicker": {
+          "type": "string",
+          "description": "Short editorial kicker line above the hero headline.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "heroHeadline": {
+          "type": "string",
+          "description": "Primary hero display headline.",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "heroSubtext": {
+          "type": "string",
+          "description": "Lead paragraph describing the developer's software work.",
+          "minLength": 1,
+          "maxLength": 320
+        },
+        "githubUsername": {
+          "type": "string",
+          "description": "Default GitHub username for profile links and quick repo import.",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "aboutText": {
+          "type": "string",
+          "description": "Short studio manifesto or creator bio.",
+          "minLength": 0,
+          "maxLength": 1200
+        },
+        "contactUrl": {
+          "type": "string",
+          "description": "Optional public contact or website URL (no private PII required).",
+          "minLength": 0,
+          "maxLength": 200
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the studio admin.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest settings update."
+        }
+      },
+      "required": [
+        "studioName",
+        "heroKicker",
+        "heroHeadline",
+        "heroSubtext",
+        "githubUsername",
+        "aboutText",
+        "contactUrl",
+        "ownerId",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/apps/{appId}": {
+      "schema": {
+        "$ref": "#/entities/ShowcaseApp"
+      },
+      "description": "Publicly readable published apps; full CRUD restricted to verified studio admin."
+    },
+    "/settings/{settingId}": {
+      "schema": {
+        "$ref": "#/entities/StudioSettings"
+      },
+      "description": "Singleton studio branding configuration document at /settings/studio."
+    }
+  }
+}
