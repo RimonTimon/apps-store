@@ -185,7 +185,7 @@ export const COPY: Record<
     admin: {
       title: 'Studio Manager',
       signInTitle: 'Admin Sign-In',
-      signInDesc: 'Restricted to owner account (mdrimon01889@gmail.com). Other accounts cannot sign in or register.',
+      signInDesc: 'Restricted to the authorized studio owner account. Other accounts cannot sign in or register.',
       signInBtn: 'Continue with Google',
       signOut: 'Sign Out',
       unauthorizedTitle: 'Admin Access Required',

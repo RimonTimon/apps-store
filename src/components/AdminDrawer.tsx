@@ -148,7 +148,7 @@ export function AdminDrawer({
           await signOut(auth);
         }
         setAuthError(
-          `Access denied. Only ${ADMIN_EMAIL} is authorized to sign in.`
+          'Access denied. Only the authorized studio owner can sign in.'
         );
       }
     } catch (err) {

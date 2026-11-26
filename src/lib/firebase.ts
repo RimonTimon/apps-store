@@ -1,12 +1,49 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
 
-export const ADMIN_EMAIL = 'mdrimon01889@gmail.com';
+interface LocalFirebaseConfig {
+  apiKey?: string;
+  authDomain?: string;
+  projectId?: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId?: string;
+  firestoreDatabaseId?: string;
+}
+
+// Optionally load gitignored local config when present (e.g. AI Studio preview),
+// without breaking external builds (e.g. Vercel from a public GitHub repo).
+const localConfigModules = import.meta.glob<{ default: LocalFirebaseConfig }>(
+  '../../firebase-applet-config.json',
+  { eager: true }
+);
+const localConfig: LocalFirebaseConfig =
+  Object.values(localConfigModules)[0]?.default ?? {};
+
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || localConfig.apiKey || '',
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || localConfig.authDomain || '',
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || localConfig.projectId || '',
+  storageBucket:
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || localConfig.storageBucket || '',
+  messagingSenderId:
+    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+    localConfig.messagingSenderId ||
+    '',
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || localConfig.appId || '',
+};
+
+const firestoreDatabaseId =
+  import.meta.env.VITE_FIREBASE_DATABASE_ID || localConfig.firestoreDatabaseId;
+
+export const ADMIN_EMAIL =
+  import.meta.env.VITE_ADMIN_EMAIL || 'mdrimon01889@gmail.com';
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = firestoreDatabaseId
+  ? getFirestore(app, firestoreDatabaseId)
+  : getFirestore(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
